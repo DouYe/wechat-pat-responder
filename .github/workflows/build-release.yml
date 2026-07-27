@@ -42,6 +42,7 @@ jobs:
           Copy-Item Run.cmd package\
           Copy-Item README.md package\
           Copy-Item README.zh-CN.md package\
+          Copy-Item CHANGELOG.md package\
           Copy-Item LICENSE package\
           Copy-Item Install-OCR.cmd package\
           New-Item -ItemType Directory -Path package\tools

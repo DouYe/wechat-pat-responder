@@ -2,6 +2,7 @@
 build/
 dist/
 release/
+release-v*/
 __pycache__/
 *.py[cod]
 *.log

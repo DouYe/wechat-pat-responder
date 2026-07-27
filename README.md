@@ -21,7 +21,8 @@ matching conversation, and sends a weighted random response.
   - 13% combo/streak response
   - 10% playful fake-system text
   - 5% text-only red-packet easter egg
-- Replies are capped at 12 characters.
+- Includes a much stranger built-in reply library, and custom replies have no
+  fixed length limit.
 
 ## Supported systems
 
