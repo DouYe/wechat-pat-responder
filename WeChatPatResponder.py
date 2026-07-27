@@ -13,7 +13,7 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -157,6 +157,112 @@ ABSTRACT_REPLIES = [
     "你的行为已让附近的袜子产生了自我意识",
     "你这一拍把我的沉默震成了可回收垃圾",
 ]
+MULTILINE_REPLIES = [
+    """吶吶吶，米娜桑，扣你起哇！
+瓦达西是二次元の烧酒哒！
+让我们一起守护最好の二次元吧！
+
+诶多诶多～为什么要妄图抹除这样的自己呢？
+中二病的你也好，二次元的你也好……
+全部都 daisuki～☆
+
+米娜桑！瓦达西二次元啊啊啊！
+哦哈哟够砸一马斯！
+今后也请多多指教喔～★""",
+    """呐……二次元の民那……
+都·是·最·最·善·良·の·存·在·呐☆
+多洗忒，要嘲笑这样的孩子呢？
+
+嘛……说到底，
+你们只是还没安装「二次元理解补丁」吧？
+现在点击确认，立刻把你流放到三维补习班★""",
+    """啊嘞啊嘞 QAQ？
+多洗忒……欧尼酱？
+已经厌烦吾辈了吗？
+
+嘛……即便是这样的瓦达西，
+一定也有存在の意义吧☆
+快来肯定啊，不然咱就要黑化成省电模式了♪""",
+    """呐……（伸出的小手又迅速垂下）
+嗦嘎……米娜桑已经不喜欢了呀。
+莫以得丝，已经大丈夫了呦。
+
+瓦达西瓦，滋多滋多——
+滋多戴斯给！
+至死都不会瓦斯裂嘛斯！（认真脸）""",
+    """诶多……阁下对于「二·次·元」の理解，
+似乎满是谬误哦☆！
+
+连最基本の礼♪义♪廉♪耻♪都失去了啊……
+这样的 kimino，
+真的拥有自称二次元的资格吗★？
+
+fufufu——鉴定完毕：
+阁下已被二次元居委会暂停会员资格七分钟。""",
+    """我是傻逼
+我是垃圾
+我是宇宙随机抽样时留下的边角料""",
+    """嗷呜！别拍了！
+别拍了！
+嗷呜呜呜呜呜呜呜呜呜呜呜！
+
+本狼已失去语言组织能力，
+接下来只能通过啃路由器表达诉求。""",
+    """郑重声明：
+本人刚才并未被拍醒。
+醒来的是寄居在我手机里的临时客服。
+
+如需联系本人，
+请准备三根网线和一份加冰豆浆，
+于凌晨三点面向打印机默念我的微信名。""",
+    """紧急通知
+由于你刚才那一下过于用力，
+本人的周一已被拍到周五，
+工资却仍停留在上个月。
+
+现决定向你追缴精神折旧费：
+共计两句好话和一杯奶茶。""",
+    """《拍一拍用户协议》
+第一条：拍我等于同意我胡说八道。
+第二条：连续拍我等于自愿加入企鹅董事会。
+第三条：本协议最终解释权归一只路过的电饭煲所有。
+
+继续拍击即视为你已阅读并完全没有理解以上内容。""",
+]
+LIFE_QUOTES = [
+    "真正可靠的成长，不是情绪高涨时做了多少，而是低谷时仍能完成最小的一步。",
+    "不要用一次结果评价长期能力；样本太少，结论通常不可靠。",
+    "能被验证的判断，胜过听起来漂亮的观点。",
+    "自由不是没有约束，而是有能力为自己的选择承担后果。",
+    "先把事实和感受分开再做决定；两者都重要，但不能彼此冒充。",
+    "沉没成本不能成为继续错误的理由，过去的投入不该绑架未来的选择。",
+    "边界不是惩罚别人，而是说明自己愿意接受什么、不会接受什么。",
+    "稳定来自可重复的习惯，而不是偶尔爆发的意志力。",
+    "当信息不足时，保留判断比仓促站队更诚实。",
+    "真正的自信允许修正观点，因为目标是接近事实，而不是证明自己从未错过。",
+    "休息不是对努力的背叛，它是维持长期行动能力的一部分。",
+    "重要的决定，尽量不要在极度愤怒、恐惧或疲惫时做。",
+    "你无法控制别人如何理解你，但可以控制表达是否清楚、行动是否一致。",
+    "解决问题前先定义问题；很多争论只是双方回答了不同的问题。",
+    "人生没有统一进度条，适合别人的时间表不自动成为你的义务。",
+    "善良需要边界，否则容易变成对伤害的默许。",
+    "做计划时高估困难，执行时低估借口。",
+    "长期主义不是等待，而是在方向正确时持续行动并及时修正。",
+    "不是所有问题都需要立刻回答，有些问题需要更多信息和一晚睡眠。",
+    "承认不知道不是软弱，而是避免把猜测包装成事实。",
+]
+DEFAULT_REPLIES = ABSTRACT_REPLIES + MULTILINE_REPLIES + LIFE_QUOTES
+REPLY_SEPARATOR = "\n---\n"
+
+
+def parse_reply_blocks(text):
+    """Split replies on a standalone --- line while preserving other newlines."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return [
+        block.strip()
+        for block in re.split(r"(?m)^[ \t]*---[ \t]*$", normalized)
+        if block.strip()
+    ]
 
 
 def find_wechat_window():
@@ -460,11 +566,14 @@ class App:
         self.trigger_entry.insert(0, "tickled m;拍了拍我;拍了拍你")
         self.trigger_entry.pack(fill="x")
 
-        ttk.Label(outer, text="抽象回复库（每行一条，无长度限制）").pack(
+        ttk.Label(
+            outer,
+            text="随机回复库（独占一行的 --- 分隔不同回复；普通换行会保留）",
+        ).pack(
             anchor="w", pady=(12, 4)
         )
         self.replies = scrolledtext.ScrolledText(outer, height=6, wrap="word")
-        self.replies.insert("1.0", "\n".join(ABSTRACT_REPLIES))
+        self.replies.insert("1.0", REPLY_SEPARATOR.join(DEFAULT_REPLIES))
         self.replies.pack(fill="x")
 
         ttk.Checkbutton(
@@ -531,11 +640,7 @@ class App:
         ]
 
     def get_replies(self):
-        return [
-            line.strip()
-            for line in self.replies.get("1.0", "end").splitlines()
-            if line.strip()
-        ]
+        return parse_reply_blocks(self.replies.get("1.0", "end"))
 
     def toggle(self):
         if self.worker and self.worker.is_alive():
@@ -809,7 +914,7 @@ class App:
         self.root.after(100, self.process_events)
 
     def handle_trigger(self, hwnd, rect, forced_reply=None):
-        action_name = "随机短句"
+        action_name = "随机回复"
         if isinstance(forced_reply, dict) and forced_reply.get("mode") == "action":
             reply, action_name = self.choose_random_action(
                 forced_reply.get("row_id", "unknown")
@@ -863,7 +968,7 @@ class App:
             replies = self.get_replies()
             return (
                 random.choice(replies) if replies else "你把我拍醒了",
-                "抽象短句",
+                "随机回复",
             )
         if roll < 0.72:
             return f"这是第{count}次拍我，再拍两下我就进化成路由器", "计数器"

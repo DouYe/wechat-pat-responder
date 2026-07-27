@@ -16,13 +16,32 @@ matching conversation, and sends a weighted random response.
 - Handles repeated pats with per-conversation state and a short deduplication
   interval.
 - Weighted actions:
-  - 55% abstract short reply
+  - 55% mixed reply, including absurd text, multiline copypasta, and serious
+    life quotes
   - 17% persistent counter
   - 13% combo/streak response
   - 10% playful fake-system text
   - 5% text-only red-packet easter egg
 - Includes a much stranger built-in reply library, and custom replies have no
   fixed length limit.
+
+## Multiline replies
+
+The editor treats a line containing only `---` as the separator between two
+random replies. Every other newline, including blank lines, remains part of the
+message sent to WeChat:
+
+```text
+First line
+Second line
+
+This blank line is preserved.
+---
+This is another random reply.
+```
+
+The app does not truncate replies, although WeChat may still enforce its own
+message-length limit.
 
 ## Supported systems
 
