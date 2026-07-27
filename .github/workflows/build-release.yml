@@ -1,0 +1,65 @@
+name: Build Windows release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Validate source
+        run: |
+          python -m py_compile WeChatPatResponder.py
+          python tools/check_environment.py
+
+      - name: Build standalone executable
+        run: pyinstaller --noconfirm --clean WeChatPatResponder.spec
+
+      - name: Assemble portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package
+          Copy-Item dist\WeChatPatResponder.exe package\
+          Copy-Item Run.cmd package\
+          Copy-Item README.md package\
+          Copy-Item README.zh-CN.md package\
+          Copy-Item LICENSE package\
+          Copy-Item Install-OCR.cmd package\
+          New-Item -ItemType Directory -Path package\tools
+          Copy-Item tools\Install-English-OCR.ps1 package\tools\
+          Compress-Archive -Path package\* -DestinationPath WeChatPatResponder-Windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeChatPatResponder-Windows-x64
+          path: WeChatPatResponder-Windows-x64.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          WeChatPatResponder-Windows-x64.zip
+          --title "WeChat Pat Responder ${{ github.ref_name }}"
+          --generate-notes

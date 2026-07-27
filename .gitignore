@@ -1,0 +1,12 @@
+.venv/
+build/
+dist/
+release/
+__pycache__/
+*.py[cod]
+*.log
+tickle_state.json
+*.zip
+dist-app-check.png
+.idea/
+.vscode/
