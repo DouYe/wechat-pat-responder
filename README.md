@@ -16,14 +16,18 @@ matching conversation, and sends a weighted random response.
 - Handles repeated pats with per-conversation state and a short deduplication
   interval.
 - Weighted actions:
-  - 55% mixed reply, including absurd text, multiline copypasta, and serious
+  - 90% mixed reply, including absurd text, multiline copypasta, and serious
     life quotes
-  - 17% persistent counter
-  - 13% combo/streak response
-  - 10% playful fake-system text
-  - 5% text-only red-packet easter egg
+  - 4% persistent counter
+  - 3% combo/streak response
+  - 2% playful fake-system text
+  - 1% text-only red-packet easter egg
 - Includes a much stranger built-in reply library, and custom replies have no
   fixed length limit.
+- Draws library replies without replacement for each detected conversation.
+  A new cycle begins only after that conversation has received the entire
+  current library, and the first reply of a new cycle cannot immediately repeat
+  the previous reply.
 
 ## Multiline replies
 
@@ -146,7 +150,10 @@ builds a portable ZIP on every push and publishes it when a `v*` tag is pushed.
 The app writes these beside the executable/source:
 
 - `tickle_events.log`: detected event history
-- `tickle_state.json`: persistent per-conversation counters and streak state
+- `reply_history.txt`: readable per-conversation history of successfully sent
+  replies
+- `tickle_state.json`: persistent per-conversation counters, streaks, reply
+  history, and no-repeat progress
 
 Both are ignored by Git.
 

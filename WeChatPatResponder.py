@@ -13,7 +13,7 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -53,6 +53,7 @@ PIL_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 CAPTURE_PATH = (PIL_TEMP_DIR / "wechat_chat_capture.png").resolve()
 SIDEBAR_CAPTURE_PATH = (PIL_TEMP_DIR / "wechat_sidebar_capture.png").resolve()
 EVENT_LOG_PATH = APP_DIR / "tickle_events.log"
+REPLY_HISTORY_PATH = APP_DIR / "reply_history.txt"
 STATE_PATH = APP_DIR / "tickle_state.json"
 DISPLAY_TIME_RE = re.compile(
     r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b\d{1,2}/\d{1,2}\b|yesterday",
@@ -265,6 +266,24 @@ def parse_reply_blocks(text):
     ]
 
 
+def choose_unused_reply(candidates, used_replies, last_reply="", choice_fn=None):
+    """Choose without replacement; start a new cycle after all choices are used."""
+    unique_candidates = list(dict.fromkeys(item for item in candidates if item))
+    if not unique_candidates:
+        return "", False
+
+    used = set(used_replies)
+    available = [item for item in unique_candidates if item not in used]
+    reset_cycle = not available
+    if reset_cycle:
+        available = [item for item in unique_candidates if item != last_reply]
+        if not available:
+            available = unique_candidates
+
+    picker = choice_fn or random.choice
+    return picker(available), reset_cycle
+
+
 def find_wechat_window():
     candidates = []
 
@@ -430,6 +449,18 @@ def record_tickle_event(row_id, text, wechat_time):
     return detected_at
 
 
+def record_reply_sent(row_id, action_name, reply):
+    sent_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    with REPLY_HISTORY_PATH.open("a", encoding="utf-8") as stream:
+        stream.write(
+            f"[{sent_at}]\n"
+            f"会话 ID: {row_id}\n"
+            f"类型: {action_name}\n"
+            f"回复:\n{reply}\n"
+            f"{'=' * 64}\n"
+        )
+
+
 def load_tickle_state():
     try:
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
@@ -439,9 +470,27 @@ def load_tickle_state():
             "counts": dict(data.get("counts", {})),
             "streaks": dict(data.get("streaks", {})),
             "last_seen": dict(data.get("last_seen", {})),
+            "used_library_replies": {
+                str(key): list(value)
+                for key, value in dict(data.get("used_library_replies", {})).items()
+                if isinstance(value, list)
+            },
+            "sent_replies": {
+                str(key): list(value)
+                for key, value in dict(data.get("sent_replies", {})).items()
+                if isinstance(value, list)
+            },
+            "last_replies": dict(data.get("last_replies", {})),
         }
     except Exception:
-        return {"counts": {}, "streaks": {}, "last_seen": {}}
+        return {
+            "counts": {},
+            "streaks": {},
+            "last_seen": {},
+            "used_library_replies": {},
+            "sent_replies": {},
+            "last_replies": {},
+        }
 
 
 def save_tickle_state(state):
@@ -604,6 +653,11 @@ class App:
         ttk.Button(buttons, text="测试随机结果", command=self.test_reply).pack(
             side="left"
         )
+        ttk.Button(
+            buttons,
+            text="打开发送记录",
+            command=self.open_reply_history,
+        ).pack(side="left", padx=8)
 
         ttk.Label(outer, text="最近一次 OCR（只显示当前聊天区）").pack(
             anchor="w", pady=(6, 4)
@@ -915,15 +969,17 @@ class App:
 
     def handle_trigger(self, hwnd, rect, forced_reply=None):
         action_name = "随机回复"
+        row_id = ""
+        selection = {"is_library": False, "reset_cycle": False}
         if isinstance(forced_reply, dict) and forced_reply.get("mode") == "action":
-            reply, action_name = self.choose_random_action(
-                forced_reply.get("row_id", "unknown")
-            )
+            row_id = forced_reply.get("row_id", "unknown")
+            reply, action_name, selection = self.choose_random_action(row_id)
+        elif forced_reply in (None, ""):
+            # 当前聊天区无法稳定 OCR 到联系人名；仍使用独立的共享去重槽。
+            row_id = "current-chat"
+            reply, action_name, selection = self.choose_random_action(row_id)
         else:
-            replies = self.get_replies()
-            reply = forced_reply or (
-                random.choice(replies) if replies else "You tickled me."
-            )
+            reply = forced_reply
         self.log(f"随机行为：{action_name}｜内容：「{reply}」")
         if not self.auto_send.get():
             self.log(f"观察模式：本来会发送「{reply}」")
@@ -945,6 +1001,8 @@ class App:
         try:
             self.send_to_wechat(hwnd, rect, reply)
             self.log(f"已发送：「{reply}」")
+            if row_id:
+                self.remember_sent_reply(row_id, action_name, reply, selection)
         except Exception as exc:
             self.auto_send.set(False)
             self.log(f"发送失败并已关闭自动发送：{exc}")
@@ -963,22 +1021,94 @@ class App:
         last_seen[row_id] = now
         save_tickle_state(self.tickle_state)
 
-        roll = random.random()
-        if roll < 0.55:
-            replies = self.get_replies()
-            return (
-                random.choice(replies) if replies else "你把我拍醒了",
-                "随机回复",
+        last_reply = self.tickle_state["last_replies"].get(row_id, "")
+        sent_replies = self.tickle_state["sent_replies"].get(row_id, [])
+
+        def choose_library_reply():
+            used = self.tickle_state["used_library_replies"].get(row_id, [])
+            reply, reset_cycle = choose_unused_reply(
+                self.get_replies(),
+                used,
+                last_reply,
             )
-        if roll < 0.72:
-            return f"这是第{count}次拍我，再拍两下我就进化成路由器", "计数器"
-        if roll < 0.85:
+            return (
+                reply or "你把我拍醒了",
+                "随机回复",
+                {"is_library": True, "reset_cycle": reset_cycle},
+            )
+
+        def choose_unseen_static(candidates, action_name):
+            available = [
+                item
+                for item in dict.fromkeys(candidates)
+                if item not in sent_replies and item != last_reply
+            ]
+            if not available:
+                return choose_library_reply()
+            return (
+                random.choice(available),
+                action_name,
+                {"is_library": False, "reset_cycle": False},
+            )
+
+        roll = random.random()
+        if roll < 0.90:
+            return choose_library_reply()
+        if roll < 0.94:
+            return (
+                f"这是第{count}次拍我，再拍两下我就进化成路由器",
+                "计数器",
+                {"is_library": False, "reset_cycle": False},
+            )
+        if roll < 0.97:
             if streak >= 2:
-                return f"{streak}连拍！你已成功把我的理智打成了压缩包", "连击系统"
-            return "连击正在蓄力，目前只惊动了一只路过的鸽子", "连击系统"
-        if roll < 0.95:
-            return random.choice(SYSTEM_REPLIES), "假装系统消息"
-        return random.choice(RED_PACKET_REPLIES), "红包彩蛋"
+                reply = (
+                    f"第{count}次事件触发{streak}连拍！"
+                    "你已成功把我的理智打成了压缩包"
+                )
+            else:
+                reply = f"第{count}次连击启动失败，只惊动了一只路过的鸽子"
+            return (
+                reply,
+                "连击系统",
+                {"is_library": False, "reset_cycle": False},
+            )
+        if roll < 0.99:
+            return choose_unseen_static(SYSTEM_REPLIES, "假装系统消息")
+        return choose_unseen_static(RED_PACKET_REPLIES, "红包彩蛋")
+
+    def remember_sent_reply(self, row_id, action_name, reply, selection):
+        if selection.get("is_library"):
+            used_by_id = self.tickle_state["used_library_replies"]
+            if selection.get("reset_cycle"):
+                used_by_id[row_id] = []
+                self.log(f"会话「{row_id}」已用完整个回复库，开始新一轮。")
+            used = used_by_id.setdefault(row_id, [])
+            if reply not in used:
+                used.append(reply)
+
+        sent = self.tickle_state["sent_replies"].setdefault(row_id, [])
+        if reply not in sent:
+            sent.append(reply)
+        self.tickle_state["last_replies"][row_id] = reply
+        save_tickle_state(self.tickle_state)
+        record_reply_sent(row_id, action_name, reply)
+
+        used_count = len(
+            self.tickle_state["used_library_replies"].get(row_id, [])
+        )
+        library_count = len(self.get_replies())
+        self.log(
+            f"去重记录：会话「{row_id}」本轮已使用 "
+            f"{used_count}/{library_count} 条随机库回复"
+        )
+
+    def open_reply_history(self):
+        try:
+            REPLY_HISTORY_PATH.touch(exist_ok=True)
+            os.startfile(REPLY_HISTORY_PATH)
+        except OSError as exc:
+            messagebox.showerror("无法打开发送记录", str(exc))
 
     def open_sidebar_conversation(self, hwnd, rect, layout, row_center):
         left, top, _, _ = rect
