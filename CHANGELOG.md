@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0
+
+- Synchronized 25 random actions from the configured Google Doc.
+- Added `>>>` syntax for sending nested entries as consecutive messages.
+- Kept multiline text inside each individual message.
+- Migrated reply history to action-level keys without losing v1.3 state.
+
 ## 1.3.0
 
 - Raised the main reply library probability from 55% to 90%.

@@ -24,6 +24,10 @@ matching conversation, and sends a weighted random response.
   - 1% text-only red-packet easter egg
 - Includes a much stranger built-in reply library, and custom replies have no
   fixed length limit.
+- Includes 25 actions synchronized from the
+  [Google Doc reply source](https://docs.google.com/document/d/1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0).
+  A top-level numbered item is one random action; its nested items are sent as
+  additional, separate messages in order.
 - Draws library replies without replacement for each detected conversation.
   A new cycle begins only after that conversation has received the entire
   current library, and the first reply of a new cycle cannot immediately repeat
@@ -46,6 +50,23 @@ This is another random reply.
 
 The app does not truncate replies, although WeChat may still enforce its own
 message-length limit.
+
+## Consecutive messages
+
+A line containing only `>>>` separates messages inside one random action.
+Unlike a normal newline, each part is pasted and sent separately, with a short
+delay while preserving order:
+
+```text
+“Doing the same thing and expecting different results is madness.”
+>>>
+And you, my friend, are very mad.
+---
+This begins another random action.
+```
+
+The Google Doc is currently private, so its revision is synchronized into the
+source by the maintainer rather than fetched anonymously at runtime.
 
 ## Supported systems
 

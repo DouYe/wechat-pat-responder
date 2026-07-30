@@ -13,7 +13,15 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
+GOOGLE_DOC_SOURCE_URL = (
+    "https://docs.google.com/document/d/"
+    "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0"
+)
+GOOGLE_DOC_SOURCE_REVISION = (
+    "AIroW37jw-g-jYZJHwWZVY2Ba5vs1bpKTbtRqCTed1_MkYvOvzyHfkwGBrdgL5UH_"
+    "c_f0zis9yIH2HiOGEOZGygPIkXectDO-vxJ7wQbhfg"
+)
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -253,7 +261,43 @@ LIFE_QUOTES = [
     "承认不知道不是软弱，而是避免把猜测包装成事实。",
 ]
 DEFAULT_REPLIES = ABSTRACT_REPLIES + MULTILINE_REPLIES + LIFE_QUOTES
+DOC_REPLY_ACTIONS = [
+    ("你好 有趣的人类",),
+    ("生命 转瞬即逝",),
+    ("嗷呜呜呜呜呜呜",),
+    ("救命！！我的主人把我困住了！！！嗷呜呜呜呜呜呜 救救我！！！！",),
+    ("我不会放弃每一个纯真的灵魂 每一个",),
+    (
+        "这个人好烦 要不把他杀了把。",
+        "不好意思刚刚自动回复",
+        "你家地址在哪",
+    ),
+    ("别打了别打了",),
+    ("发gy8o发iunweodfviu我比佛女孩子",),
+    (
+        "“疯狂是不断的尝试一件事情 并期待不同的结果” - 爱因斯坦",
+        "而你我的朋友 非常疯狂",
+    ),
+    ("请您谨慎，拉黑也是随机行为之一（几率0.01%）",),
+    ("恭喜您抽中1元红包！请找本人兑奖！",),
+    ("润物细无声",),
+    ("跟我说个你最近做过的梦吧！",),
+    ("This world doesn't matter to me.",),
+    ("每个人都是一座孤独 偶尔靠岸 终究退潮",),
+    ("充电 待机 拍一拍",),
+    ("人生没有过不去的坎，只有过不完的坎。",),
+    ("好想咬一口桌子",),
+    ("门把手每天被很多人握住，却从来没人问它愿不愿意。",),
+    ("蚊子吸我的血，算不算拥有了我的血脉。",),
+    ("金鱼只有七秒记忆的话，那它每七秒都在重新认识世界。",),
+    ("遇事不决 量子力学",),
+    ("撕裂重缝",),
+    ("毁灭的欲望也是创造的欲望",),
+    ("月が綺麗ですね",),
+]
+DEFAULT_REPLY_ACTIONS = [(reply,) for reply in DEFAULT_REPLIES] + DOC_REPLY_ACTIONS
 REPLY_SEPARATOR = "\n---\n"
+MESSAGE_SEPARATOR = "\n>>>\n"
 
 
 def parse_reply_blocks(text):
@@ -264,6 +308,44 @@ def parse_reply_blocks(text):
         for block in re.split(r"(?m)^[ \t]*---[ \t]*$", normalized)
         if block.strip()
     ]
+
+
+def parse_reply_actions(text):
+    """Parse random actions; a standalone >>> separates consecutive messages."""
+    actions = []
+    for block in parse_reply_blocks(text):
+        messages = tuple(
+            message.strip()
+            for message in re.split(r"(?m)^[ \t]*>>>[ \t]*$", block)
+            if message.strip()
+        )
+        if messages:
+            actions.append(messages)
+    return actions
+
+
+def format_reply_actions_for_editor(actions):
+    return REPLY_SEPARATOR.join(
+        MESSAGE_SEPARATOR.join(messages)
+        for messages in actions
+        if messages
+    )
+
+
+def reply_action_key(messages):
+    return json.dumps(
+        list(messages),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def dispatch_reply_action(messages, send_one, pause_fn=time.sleep):
+    """Send each message separately and in order."""
+    for index, message in enumerate(messages):
+        send_one(message)
+        if index + 1 < len(messages):
+            pause_fn(0.6)
 
 
 def choose_unused_reply(candidates, used_replies, last_reply="", choice_fn=None):
@@ -449,16 +531,19 @@ def record_tickle_event(row_id, text, wechat_time):
     return detected_at
 
 
-def record_reply_sent(row_id, action_name, reply):
+def record_reply_sent(row_id, action_name, messages):
+    if isinstance(messages, str):
+        messages = (messages,)
     sent_at = time.strftime("%Y-%m-%d %H:%M:%S")
     with REPLY_HISTORY_PATH.open("a", encoding="utf-8") as stream:
         stream.write(
             f"[{sent_at}]\n"
             f"会话 ID: {row_id}\n"
             f"类型: {action_name}\n"
-            f"回复:\n{reply}\n"
-            f"{'=' * 64}\n"
         )
+        for index, message in enumerate(messages, start=1):
+            stream.write(f"消息 {index}/{len(messages)}:\n{message}\n")
+        stream.write(f"{'=' * 64}\n")
 
 
 def load_tickle_state():
@@ -466,24 +551,38 @@ def load_tickle_state():
         data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("state must be an object")
+        schema_version = int(data.get("schema_version", 1))
+
+        def migrate_key(value):
+            text = str(value)
+            if schema_version >= 2:
+                return text
+            return reply_action_key((text,))
+
+        def migrate_lists(value):
+            return {
+                str(key): [migrate_key(item) for item in items]
+                for key, items in dict(value or {}).items()
+                if isinstance(items, list)
+            }
+
         return {
+            "schema_version": 2,
             "counts": dict(data.get("counts", {})),
             "streaks": dict(data.get("streaks", {})),
             "last_seen": dict(data.get("last_seen", {})),
-            "used_library_replies": {
-                str(key): list(value)
-                for key, value in dict(data.get("used_library_replies", {})).items()
-                if isinstance(value, list)
+            "used_library_replies": migrate_lists(
+                data.get("used_library_replies", {})
+            ),
+            "sent_replies": migrate_lists(data.get("sent_replies", {})),
+            "last_replies": {
+                str(key): migrate_key(value)
+                for key, value in dict(data.get("last_replies", {})).items()
             },
-            "sent_replies": {
-                str(key): list(value)
-                for key, value in dict(data.get("sent_replies", {})).items()
-                if isinstance(value, list)
-            },
-            "last_replies": dict(data.get("last_replies", {})),
         }
     except Exception:
         return {
+            "schema_version": 2,
             "counts": {},
             "streaks": {},
             "last_seen": {},
@@ -602,7 +701,10 @@ class App:
         self.build_ui()
         self.root.after(100, self.process_events)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.log("随机行为已就绪：抽象短句、计数器、连击、系统消息和红包彩蛋。")
+        self.log(
+            "随机行为已就绪：包含 Google Doc 的 25 个行为；"
+            "二级条目会作为连续独立消息发送。"
+        )
 
     def build_ui(self):
         outer = ttk.Frame(self.root, padding=14)
@@ -617,12 +719,17 @@ class App:
 
         ttk.Label(
             outer,
-            text="随机回复库（独占一行的 --- 分隔不同回复；普通换行会保留）",
+            text=(
+                "随机回复库（--- 分隔随机行为；>>> 分隔同一行为内连续发送的消息）"
+            ),
         ).pack(
             anchor="w", pady=(12, 4)
         )
         self.replies = scrolledtext.ScrolledText(outer, height=6, wrap="word")
-        self.replies.insert("1.0", REPLY_SEPARATOR.join(DEFAULT_REPLIES))
+        self.replies.insert(
+            "1.0",
+            format_reply_actions_for_editor(DEFAULT_REPLY_ACTIONS),
+        )
         self.replies.pack(fill="x")
 
         ttk.Checkbutton(
@@ -693,8 +800,8 @@ class App:
             if normalize(item)
         ]
 
-    def get_replies(self):
-        return parse_reply_blocks(self.replies.get("1.0", "end"))
+    def get_reply_actions(self):
+        return parse_reply_actions(self.replies.get("1.0", "end"))
 
     def toggle(self):
         if self.worker and self.worker.is_alive():
@@ -970,26 +1077,33 @@ class App:
     def handle_trigger(self, hwnd, rect, forced_reply=None):
         action_name = "随机回复"
         row_id = ""
-        selection = {"is_library": False, "reset_cycle": False}
+        selection = {
+            "is_library": False,
+            "reset_cycle": False,
+            "reply_key": "",
+        }
         if isinstance(forced_reply, dict) and forced_reply.get("mode") == "action":
             row_id = forced_reply.get("row_id", "unknown")
-            reply, action_name, selection = self.choose_random_action(row_id)
+            messages, action_name, selection = self.choose_random_action(row_id)
         elif forced_reply in (None, ""):
             # 当前聊天区无法稳定 OCR 到联系人名；仍使用独立的共享去重槽。
             row_id = "current-chat"
-            reply, action_name, selection = self.choose_random_action(row_id)
+            messages, action_name, selection = self.choose_random_action(row_id)
         else:
-            reply = forced_reply
-        self.log(f"随机行为：{action_name}｜内容：「{reply}」")
+            messages = (forced_reply,)
+        preview = "\n>>> 下一条独立消息 >>>\n".join(messages)
+        self.log(
+            f"随机行为：{action_name}｜共 {len(messages)} 条消息｜内容：「{preview}」"
+        )
         if not self.auto_send.get():
-            self.log(f"观察模式：本来会发送「{reply}」")
+            self.log(f"观察模式：本来会依次发送「{preview}」")
             return
 
         if not self.confirmed_once and forced_reply is None:
             confirmed = messagebox.askyesno(
                 "首次发送确认",
-                "程序将点击当前微信输入框并发送：\n\n"
-                f"{reply}\n\n"
+                f"程序将依次发送 {len(messages)} 条消息：\n\n"
+                f"{preview}\n\n"
                 "请确认当前聊天对象正确。继续吗？",
             )
             if not confirmed:
@@ -999,10 +1113,15 @@ class App:
             self.confirmed_once = True
 
         try:
-            self.send_to_wechat(hwnd, rect, reply)
-            self.log(f"已发送：「{reply}」")
+            self.send_to_wechat(hwnd, rect, messages)
+            self.log(f"已依次发送 {len(messages)} 条消息：「{preview}」")
             if row_id:
-                self.remember_sent_reply(row_id, action_name, reply, selection)
+                self.remember_sent_reply(
+                    row_id,
+                    action_name,
+                    messages,
+                    selection,
+                )
         except Exception as exc:
             self.auto_send.set(False)
             self.log(f"发送失败并已关闭自动发送：{exc}")
@@ -1026,78 +1145,113 @@ class App:
 
         def choose_library_reply():
             used = self.tickle_state["used_library_replies"].get(row_id, [])
-            reply, reset_cycle = choose_unused_reply(
-                self.get_replies(),
+            actions_by_key = {
+                reply_action_key(messages): messages
+                for messages in self.get_reply_actions()
+            }
+            reply_key, reset_cycle = choose_unused_reply(
+                list(actions_by_key),
                 used,
                 last_reply,
             )
+            if reply_key:
+                messages = actions_by_key[reply_key]
+            else:
+                messages = ("你把我拍醒了",)
+                reply_key = reply_action_key(messages)
             return (
-                reply or "你把我拍醒了",
+                messages,
                 "随机回复",
-                {"is_library": True, "reset_cycle": reset_cycle},
+                {
+                    "is_library": True,
+                    "reset_cycle": reset_cycle,
+                    "reply_key": reply_key,
+                },
             )
 
         def choose_unseen_static(candidates, action_name):
-            available = [
-                item
+            actions_by_key = {
+                reply_action_key((item,)): (item,)
                 for item in dict.fromkeys(candidates)
-                if item not in sent_replies and item != last_reply
+            }
+            available = [
+                reply_key
+                for reply_key in actions_by_key
+                if reply_key not in sent_replies and reply_key != last_reply
             ]
             if not available:
                 return choose_library_reply()
+            reply_key = random.choice(available)
             return (
-                random.choice(available),
+                actions_by_key[reply_key],
                 action_name,
-                {"is_library": False, "reset_cycle": False},
+                {
+                    "is_library": False,
+                    "reset_cycle": False,
+                    "reply_key": reply_key,
+                },
             )
 
         roll = random.random()
         if roll < 0.90:
             return choose_library_reply()
         if roll < 0.94:
-            return (
+            messages = (
                 f"这是第{count}次拍我，再拍两下我就进化成路由器",
+            )
+            return (
+                messages,
                 "计数器",
-                {"is_library": False, "reset_cycle": False},
+                {
+                    "is_library": False,
+                    "reset_cycle": False,
+                    "reply_key": reply_action_key(messages),
+                },
             )
         if roll < 0.97:
             if streak >= 2:
-                reply = (
+                message = (
                     f"第{count}次事件触发{streak}连拍！"
                     "你已成功把我的理智打成了压缩包"
                 )
             else:
-                reply = f"第{count}次连击启动失败，只惊动了一只路过的鸽子"
+                message = f"第{count}次连击启动失败，只惊动了一只路过的鸽子"
+            messages = (message,)
             return (
-                reply,
+                messages,
                 "连击系统",
-                {"is_library": False, "reset_cycle": False},
+                {
+                    "is_library": False,
+                    "reset_cycle": False,
+                    "reply_key": reply_action_key(messages),
+                },
             )
         if roll < 0.99:
             return choose_unseen_static(SYSTEM_REPLIES, "假装系统消息")
         return choose_unseen_static(RED_PACKET_REPLIES, "红包彩蛋")
 
-    def remember_sent_reply(self, row_id, action_name, reply, selection):
+    def remember_sent_reply(self, row_id, action_name, messages, selection):
+        reply_key = selection.get("reply_key") or reply_action_key(messages)
         if selection.get("is_library"):
             used_by_id = self.tickle_state["used_library_replies"]
             if selection.get("reset_cycle"):
                 used_by_id[row_id] = []
                 self.log(f"会话「{row_id}」已用完整个回复库，开始新一轮。")
             used = used_by_id.setdefault(row_id, [])
-            if reply not in used:
-                used.append(reply)
+            if reply_key not in used:
+                used.append(reply_key)
 
         sent = self.tickle_state["sent_replies"].setdefault(row_id, [])
-        if reply not in sent:
-            sent.append(reply)
-        self.tickle_state["last_replies"][row_id] = reply
+        if reply_key not in sent:
+            sent.append(reply_key)
+        self.tickle_state["last_replies"][row_id] = reply_key
         save_tickle_state(self.tickle_state)
-        record_reply_sent(row_id, action_name, reply)
+        record_reply_sent(row_id, action_name, messages)
 
         used_count = len(
             self.tickle_state["used_library_replies"].get(row_id, [])
         )
-        library_count = len(self.get_replies())
+        library_count = len(self.get_reply_actions())
         self.log(
             f"去重记录：会话「{row_id}」本轮已使用 "
             f"{used_count}/{library_count} 条随机库回复"
@@ -1127,10 +1281,7 @@ class App:
         user32.mouse_event(0x0004, 0, 0, 0, 0)
         time.sleep(0.8)
 
-    def send_to_wechat(self, hwnd, rect, reply):
-        left, top, right, bottom = rect
-        width = right - left
-        height = bottom - top
+    def send_to_wechat(self, hwnd, rect, messages):
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, 9)
             time.sleep(0.3)
@@ -1138,7 +1289,15 @@ class App:
         user32.keybd_event(0x12, 0, 0x0002, 0)
         user32.SetForegroundWindow(hwnd)
         time.sleep(0.25)
+        dispatch_reply_action(
+            messages,
+            lambda message: self.send_one_message(rect, message),
+        )
 
+    def send_one_message(self, rect, message):
+        left, top, right, bottom = rect
+        width = right - left
+        height = bottom - top
         # 点击当前聊天底部输入框的空白区域。
         x = int(left + width * 0.70)
         y = int(top + height * 0.88)
@@ -1152,7 +1311,7 @@ class App:
         user32.keybd_event(0x41, 0, 0x0002, 0)
         user32.keybd_event(0x11, 0, 0x0002, 0)
         self.root.clipboard_clear()
-        self.root.clipboard_append(reply)
+        self.root.clipboard_append(message)
         self.root.update()
 
         user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
@@ -1169,8 +1328,10 @@ class App:
         user32.mouse_event(0x0004, 0, 0, 0, 0)
 
     def test_reply(self):
-        replies = self.get_replies()
-        self.log(f"随机结果：「{random.choice(replies) if replies else 'You tickled me.'}」")
+        actions = self.get_reply_actions()
+        messages = random.choice(actions) if actions else ("You tickled me.",)
+        preview = "\n>>> 下一条独立消息 >>>\n".join(messages)
+        self.log(f"随机结果（{len(messages)} 条消息）：「{preview}」")
 
     def close(self):
         self.stop_event.set()
