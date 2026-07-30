@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.0
+
+- Import image-only numbered Google Doc entries as random actions.
+- Cache each imported image locally under a stable content hash.
+- Send image actions through the Windows bitmap clipboard and WeChat paste
+  flow.
+- Show `[图片]` in the library preview and readable reply history while using
+  the image hash for per-conversation no-repeat tracking.
+
 ## 1.5.0
 
 - Read the public Google Doc once at startup and on the new **Reload 文档**

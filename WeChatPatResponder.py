@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import ctypes
 import hashlib
+import io
 import json
 import os
 import queue
@@ -15,7 +17,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 GOOGLE_DOC_SOURCE_URL = (
     "https://docs.google.com/document/d/"
     "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0"
@@ -45,6 +47,7 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 from PIL import Image, ImageChops
+import win32clipboard
 import win32gui
 import win32ui
 from winrt.windows.globalization import Language
@@ -68,6 +71,17 @@ EVENT_LOG_PATH = APP_DIR / "tickle_events.log"
 REPLY_HISTORY_PATH = APP_DIR / "reply_history.txt"
 STATE_PATH = APP_DIR / "tickle_state.json"
 GOOGLE_DOC_CACHE_PATH = APP_DIR / "google_doc_replies_cache.json"
+GOOGLE_DOC_MEDIA_DIR = APP_DIR / "google_doc_media"
+IMAGE_MESSAGE_PREFIX = "[[WECHAT_IMAGE:"
+IMAGE_MESSAGE_RE = re.compile(
+    r"^\[\[WECHAT_IMAGE:([0-9a-f]{64})\.(jpg|png|gif|webp)\]\]$"
+)
+DATA_IMAGE_RE = re.compile(
+    r"^data:image/(jpeg|jpg|png|gif|webp);base64,(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+MAX_DOC_IMAGE_BYTES = 25 * 1024 * 1024
+WINDOWS_CF_DIB = 8
 DISPLAY_TIME_RE = re.compile(
     r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b\d{1,2}/\d{1,2}\b|yesterday",
     re.IGNORECASE,
@@ -332,6 +346,7 @@ class GoogleDocListHTMLParser(HTMLParser):
         self.list_levels = []
         self.item_level = None
         self.item_chunks = []
+        self.item_image_sources = []
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -344,16 +359,28 @@ class GoogleDocListHTMLParser(HTMLParser):
             if level is not None:
                 self.item_level = level
                 self.item_chunks = []
+                self.item_image_sources = []
         elif tag == "br" and self.item_level is not None:
             self.item_chunks.append("\n")
+        elif tag == "img" and self.item_level is not None:
+            source = attrs.get("src", "").strip()
+            if source:
+                self.item_image_sources.append(source)
 
     def handle_endtag(self, tag):
         if tag == "li" and self.item_level is not None:
             text = normalize_google_doc_reply_text("".join(self.item_chunks))
-            if text:
-                self.items.append((self.item_level, text))
+            if text or self.item_image_sources:
+                self.items.append(
+                    (
+                        self.item_level,
+                        text,
+                        tuple(self.item_image_sources),
+                    )
+                )
             self.item_level = None
             self.item_chunks = []
+            self.item_image_sources = []
         elif tag in {"ol", "ul"} and self.list_levels:
             self.list_levels.pop()
 
@@ -362,19 +389,115 @@ class GoogleDocListHTMLParser(HTMLParser):
             self.item_chunks.append(data)
 
 
-def parse_google_doc_reply_actions(html_text):
+def parse_google_doc_reply_actions(html_text, image_resolver=None):
     """Parse the live Doc: top-level items are actions; nested items follow it."""
     parser = GoogleDocListHTMLParser()
     parser.feed(html_text)
     parser.close()
 
     actions = []
-    for level, text in parser.items:
+    for level, text, image_sources in parser.items:
+        messages = []
+        if text:
+            messages.append(text)
+        if image_resolver is not None:
+            messages.extend(
+                image_resolver(source)
+                for source in image_sources
+            )
+        if not messages:
+            continue
         if level == 0 or not actions:
-            actions.append([text])
+            actions.append(messages)
         else:
-            actions[-1].append(text)
+            actions[-1].extend(messages)
     return [tuple(messages) for messages in actions if messages]
+
+
+def is_image_message(message):
+    return bool(
+        isinstance(message, str)
+        and IMAGE_MESSAGE_RE.fullmatch(message)
+    )
+
+
+def format_message_preview(message):
+    return "[图片]" if is_image_message(message) else message
+
+
+def image_message_path(message, media_dir=GOOGLE_DOC_MEDIA_DIR):
+    match = IMAGE_MESSAGE_RE.fullmatch(message) if isinstance(message, str) else None
+    if match is None:
+        raise ValueError("不是有效的图片消息")
+    path = media_dir / f"{match.group(1)}.{match.group(2)}"
+    if not path.is_file():
+        raise FileNotFoundError(f"缓存图片不存在：{path}")
+    return path
+
+
+def materialize_google_doc_image(source, media_dir=GOOGLE_DOC_MEDIA_DIR):
+    """Validate and cache a Google Doc data-image, returning a stable token."""
+    match = DATA_IMAGE_RE.fullmatch(source.strip())
+    if match is None:
+        raise ValueError("Google Doc 图片不是受支持的内嵌图片")
+    extension = match.group(1).lower()
+    if extension == "jpeg":
+        extension = "jpg"
+    encoded = re.sub(r"\s+", "", match.group(2))
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Google Doc 图片的 Base64 数据无效") from exc
+    if not image_bytes:
+        raise ValueError("Google Doc 图片内容为空")
+    if len(image_bytes) > MAX_DOC_IMAGE_BYTES:
+        raise ValueError(
+            f"Google Doc 图片超过 {MAX_DOC_IMAGE_BYTES // (1024 * 1024)} MB"
+        )
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.verify()
+    except Exception as exc:
+        raise ValueError("Google Doc 图片内容无法识别") from exc
+
+    digest = hashlib.sha256(image_bytes).hexdigest()
+    media_dir.mkdir(parents=True, exist_ok=True)
+    target = media_dir / f"{digest}.{extension}"
+    if not target.exists():
+        temp_path = target.with_suffix(target.suffix + ".tmp")
+        temp_path.write_bytes(image_bytes)
+        os.replace(temp_path, target)
+    return f"{IMAGE_MESSAGE_PREFIX}{digest}.{extension}]]"
+
+
+def image_to_dib_bytes(path):
+    """Convert the first image frame to the CF_DIB payload Windows expects."""
+    with Image.open(path) as image:
+        output = io.BytesIO()
+        image.convert("RGB").save(output, "BMP")
+    bitmap = output.getvalue()
+    if len(bitmap) <= 14 or bitmap[:2] != b"BM":
+        raise ValueError("无法转换图片到 Windows 剪贴板格式")
+    return bitmap[14:]
+
+
+def copy_image_to_clipboard(path, retry_count=8, retry_delay=0.05):
+    dib_bytes = image_to_dib_bytes(path)
+    last_error = None
+    for _ in range(retry_count):
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardData(WINDOWS_CF_DIB, dib_bytes)
+            finally:
+                win32clipboard.CloseClipboard()
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(retry_delay)
+    raise RuntimeError(f"无法把图片写入 Windows 剪贴板：{last_error}")
 
 
 def fetch_google_doc_reply_actions(
@@ -382,6 +505,7 @@ def fetch_google_doc_reply_actions(
     timeout=GOOGLE_DOC_FETCH_TIMEOUT_SECONDS,
     opener=urlopen,
     now_fn=time.time,
+    media_dir=GOOGLE_DOC_MEDIA_DIR,
 ):
     """Fetch a cache-busted public Doc export and preserve its list order."""
     separator = "&" if "?" in export_url else "?"
@@ -399,7 +523,13 @@ def fetch_google_doc_reply_actions(
     with opener(request, timeout=timeout) as response:
         payload = response.read()
         charset = response.headers.get_content_charset() or "utf-8"
-    actions = parse_google_doc_reply_actions(payload.decode(charset, errors="replace"))
+    actions = parse_google_doc_reply_actions(
+        payload.decode(charset, errors="replace"),
+        image_resolver=lambda source: materialize_google_doc_image(
+            source,
+            media_dir,
+        ),
+    )
     if not actions:
         raise ValueError("Google Doc 导出内容中没有可用的编号词条")
     return actions
@@ -467,7 +597,10 @@ def parse_reply_actions(text):
 
 def format_reply_actions_for_editor(actions):
     return REPLY_SEPARATOR.join(
-        MESSAGE_SEPARATOR.join(messages)
+        MESSAGE_SEPARATOR.join(
+            format_message_preview(message)
+            for message in messages
+        )
         for messages in actions
         if messages
     )
@@ -683,7 +816,10 @@ def record_reply_sent(row_id, action_name, messages):
             f"类型: {action_name}\n"
         )
         for index, message in enumerate(messages, start=1):
-            stream.write(f"消息 {index}/{len(messages)}:\n{message}\n")
+            stream.write(
+                f"消息 {index}/{len(messages)}:\n"
+                f"{format_message_preview(message)}\n"
+            )
         stream.write(f"{'=' * 64}\n")
 
 
@@ -854,7 +990,8 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.log(
             "Google Doc 模式已就绪；启动时读取一次，之后可点击 "
-            "Reload 文档手动更新。二级条目会作为连续独立消息发送。"
+            "Reload 文档手动更新。二级条目会作为连续独立消息发送，"
+            "图片条目会下载到本地缓存。"
         )
 
     def build_ui(self):
@@ -872,7 +1009,7 @@ class App:
             outer,
             text=(
                 "Google Doc 回复库（只读快照；一级编号是随机行为，"
-                "二级编号是连续消息）"
+                "二级编号是连续消息，支持图片）"
             ),
         ).pack(
             anchor="w", pady=(12, 4)
@@ -1292,7 +1429,10 @@ class App:
             messages, action_name, selection = self.choose_random_action(row_id)
         else:
             messages = (forced_reply,)
-        preview = "\n>>> 下一条独立消息 >>>\n".join(messages)
+        preview = "\n>>> 下一条独立消息 >>>\n".join(
+            format_message_preview(message)
+            for message in messages
+        )
         self.log(
             f"随机行为：{action_name}｜共 {len(messages)} 条消息｜内容：「{preview}」"
         )
@@ -1511,15 +1651,21 @@ class App:
         user32.keybd_event(0x41, 0, 0, 0)
         user32.keybd_event(0x41, 0, 0x0002, 0)
         user32.keybd_event(0x11, 0, 0x0002, 0)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(message)
-        self.root.update()
+        if is_image_message(message):
+            path = image_message_path(message)
+            copy_image_to_clipboard(path)
+            paste_delay = 0.65
+        else:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(message)
+            self.root.update()
+            paste_delay = 0.20
 
         user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
         user32.keybd_event(0x56, 0, 0, 0)  # V down
         user32.keybd_event(0x56, 0, 0x0002, 0)
         user32.keybd_event(0x11, 0, 0x0002, 0)
-        time.sleep(0.20)
+        time.sleep(paste_delay)
 
         # 点击 Send，比依赖用户的 Enter/Ctrl+Enter 发送设置更稳定。
         send_x = int(right - 37)
@@ -1531,7 +1677,10 @@ class App:
     def test_reply(self):
         actions = self.get_reply_actions()
         messages = random.choice(actions) if actions else ("You tickled me.",)
-        preview = "\n>>> 下一条独立消息 >>>\n".join(messages)
+        preview = "\n>>> 下一条独立消息 >>>\n".join(
+            format_message_preview(message)
+            for message in messages
+        )
         self.log(f"随机结果（{len(messages)} 条消息）：「{preview}」")
 
     def close(self):

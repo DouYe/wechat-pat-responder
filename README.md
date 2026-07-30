@@ -28,6 +28,9 @@ matching conversation, and sends a weighted random response.
 - Preserves the document's action order. A top-level numbered item is one
   random action; its nested items are sent as additional, separate messages in
   order.
+- Imports an image-only numbered item as an image reply. Images are downloaded
+  only during startup/Reload, cached by content hash, and pasted into WeChat
+  from the Windows image clipboard when selected.
 - Saves every successful read as an ordered local cache. If Google Docs is
   temporarily unavailable, the last successful cache is used instead.
 - Draws library replies without replacement for each detected conversation.
@@ -42,6 +45,9 @@ matching conversation, and sends a weighted random response.
   as separate messages in their displayed order.
 - Put `↵` inside one numbered item to create a newline inside that same WeChat
   message. Two markers (`↵ ↵`) create a blank line.
+- Put an image in its own top-level numbered item to make it one random image
+  action. PNG, JPEG, GIF, and WebP source images are accepted; animated images
+  are pasted as their first frame.
 
 ```text
 1. “Doing the same thing and expecting different results is madness.”
@@ -161,8 +167,10 @@ The app writes these beside the executable/source:
   replies
 - `tickle_state.json`: persistent per-conversation counters, streaks, reply
   history, and no-repeat progress
+- `google_doc_replies_cache.json`: latest ordered text/image reply snapshot
+- `google_doc_media`: locally cached Google Doc images
 
-Both are ignored by Git.
+These runtime files are ignored by Git.
 
 ## License
 

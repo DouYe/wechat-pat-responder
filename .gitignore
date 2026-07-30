@@ -9,6 +9,7 @@ __pycache__/
 tickle_state.json
 reply_history.txt
 google_doc_replies_cache.json
+google_doc_media/
 *.zip
 dist-app-check.png
 .idea/

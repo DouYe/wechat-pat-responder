@@ -1,8 +1,12 @@
+import base64
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+from PIL import Image
 
 from WeChatPatResponder import (
     App,
@@ -10,8 +14,14 @@ from WeChatPatResponder import (
     choose_unused_reply,
     dispatch_reply_action,
     fetch_google_doc_reply_actions,
+    format_message_preview,
+    format_reply_actions_for_editor,
+    image_message_path,
+    image_to_dib_bytes,
+    is_image_message,
     load_google_doc_cache,
     load_tickle_state,
+    materialize_google_doc_image,
     parse_google_doc_reply_actions,
     parse_reply_actions,
     parse_reply_blocks,
@@ -109,6 +119,58 @@ class GoogleDocReplyTests(unittest.TestCase):
                 ("最后一项",),
             ],
         )
+
+    def test_image_only_numbered_item_is_cached_as_an_action(self):
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (3, 2), (12, 34, 56)).save(
+            image_buffer,
+            "PNG",
+        )
+        source = (
+            "data:image/png;base64,"
+            + base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        )
+        html = (
+            '<ol class="lst-kix_demo-0">'
+            "<li>文字条目</li>"
+            f'<li><img src="{source}"></li>'
+            "</ol>"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media_dir = Path(temp_dir)
+            actions = parse_google_doc_reply_actions(
+                html,
+                image_resolver=lambda value: materialize_google_doc_image(
+                    value,
+                    media_dir,
+                ),
+            )
+
+            self.assertEqual(actions[0], ("文字条目",))
+            self.assertEqual(len(actions), 2)
+            image_message = actions[1][0]
+            self.assertTrue(is_image_message(image_message))
+            self.assertTrue(image_message_path(image_message, media_dir).is_file())
+            self.assertEqual(format_message_preview(image_message), "[图片]")
+
+    def test_image_is_converted_to_windows_dib_without_bitmap_file_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "sample.png"
+            Image.new("RGBA", (2, 2), (255, 0, 0, 128)).save(image_path)
+
+            dib = image_to_dib_bytes(image_path)
+
+        self.assertNotEqual(dib[:2], b"BM")
+        self.assertEqual(int.from_bytes(dib[:4], "little"), 40)
+        self.assertGreater(len(dib), 40)
+
+    def test_library_preview_hides_internal_image_token(self):
+        token = f"[[WECHAT_IMAGE:{'a' * 64}.jpg]]"
+        preview = format_reply_actions_for_editor(
+            [("文字", token)]
+        )
+        self.assertEqual(preview, "文字\n>>>\n[图片]")
 
     def test_live_fetch_is_cache_busted(self):
         html = (
