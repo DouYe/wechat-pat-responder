@@ -5,14 +5,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 from WeChatPatResponder import (
+    App,
     DOC_REPLY_ACTIONS,
     choose_unused_reply,
     dispatch_reply_action,
+    fetch_google_doc_reply_actions,
+    load_google_doc_cache,
     load_tickle_state,
+    parse_google_doc_reply_actions,
     parse_reply_actions,
     parse_reply_blocks,
     record_reply_sent,
     reply_action_key,
+    save_google_doc_cache,
 )
 
 
@@ -59,7 +64,7 @@ class ReplyParsingTests(unittest.TestCase):
 
 
 class GoogleDocReplyTests(unittest.TestCase):
-    def test_current_document_has_25_top_level_actions(self):
+    def test_bundled_emergency_snapshot_has_25_top_level_actions(self):
         self.assertEqual(len(DOC_REPLY_ACTIONS), 25)
 
     def test_einstein_nested_item_is_a_second_message(self):
@@ -80,6 +85,92 @@ class GoogleDocReplyTests(unittest.TestCase):
             ),
             DOC_REPLY_ACTIONS,
         )
+
+    def test_html_export_preserves_order_nesting_and_visible_newlines(self):
+        html = """
+        <html><body>
+          <ol class="x lst-kix_demo-0 start">
+            <li><span>第一项</span></li>
+          </ol>
+          <ol class="x lst-kix_demo-1 start">
+            <li><span>第二条消息</span><br><span>第二行</span></li>
+          </ol>
+          <ol class="x lst-kix_demo-0">
+            <li><span>甲 ↵ 乙 ↵ ↵ 丙</span></li>
+            <li><span>最后一项</span></li>
+          </ol>
+        </body></html>
+        """
+        self.assertEqual(
+            parse_google_doc_reply_actions(html),
+            [
+                ("第一项", "第二条消息\n第二行"),
+                ("甲\n乙\n\n丙",),
+                ("最后一项",),
+            ],
+        )
+
+    def test_live_fetch_is_cache_busted(self):
+        html = (
+            '<ol class="lst-kix_demo-0">'
+            "<li>实时第一条</li><li>实时第二条</li></ol>"
+        )
+        captured = {}
+
+        class Headers:
+            @staticmethod
+            def get_content_charset():
+                return "utf-8"
+
+        class Response:
+            headers = Headers()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            @staticmethod
+            def read():
+                return html.encode("utf-8")
+
+        def opener(request, timeout):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            return Response()
+
+        actions = fetch_google_doc_reply_actions(
+            export_url="https://example.test/export?format=html",
+            timeout=2.5,
+            opener=opener,
+            now_fn=lambda: 123.456,
+        )
+        self.assertEqual(actions, [("实时第一条",), ("实时第二条",)])
+        self.assertIn("cache_bust=123456", captured["url"])
+        self.assertEqual(captured["timeout"], 2.5)
+
+    def test_cache_round_trip_keeps_action_and_message_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "doc-cache.json"
+            actions = [
+                ("第一行为", "第二条消息"),
+                ("第二行为",),
+            ]
+            save_google_doc_cache(actions, cache_path)
+            self.assertEqual(load_google_doc_cache(cache_path), actions)
+
+    def test_pat_selection_uses_loaded_snapshot_without_network(self):
+        app = App.__new__(App)
+        app.reply_actions_cache = [("已载入的第一条",), ("已载入的第二条",)]
+        with patch(
+            "WeChatPatResponder.fetch_google_doc_reply_actions"
+        ) as fetch:
+            self.assertEqual(
+                app.get_reply_actions(),
+                app.reply_actions_cache,
+            )
+        fetch.assert_not_called()
 
 
 class DispatchTests(unittest.TestCase):

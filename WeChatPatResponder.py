@@ -11,17 +11,21 @@ import tempfile
 import threading
 import time
 from ctypes import wintypes
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.request import Request, urlopen
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 GOOGLE_DOC_SOURCE_URL = (
     "https://docs.google.com/document/d/"
     "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0"
 )
-GOOGLE_DOC_SOURCE_REVISION = (
-    "AIroW37jw-g-jYZJHwWZVY2Ba5vs1bpKTbtRqCTed1_MkYvOvzyHfkwGBrdgL5UH_"
-    "c_f0zis9yIH2HiOGEOZGygPIkXectDO-vxJ7wQbhfg"
+GOOGLE_DOC_EXPORT_URL = (
+    "https://docs.google.com/document/d/"
+    "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/export"
+    "?format=html&tab=t.0"
 )
+GOOGLE_DOC_FETCH_TIMEOUT_SECONDS = 4.0
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -63,6 +67,7 @@ SIDEBAR_CAPTURE_PATH = (PIL_TEMP_DIR / "wechat_sidebar_capture.png").resolve()
 EVENT_LOG_PATH = APP_DIR / "tickle_events.log"
 REPLY_HISTORY_PATH = APP_DIR / "reply_history.txt"
 STATE_PATH = APP_DIR / "tickle_state.json"
+GOOGLE_DOC_CACHE_PATH = APP_DIR / "google_doc_replies_cache.json"
 DISPLAY_TIME_RE = re.compile(
     r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b\d{1,2}/\d{1,2}\b|yesterday",
     re.IGNORECASE,
@@ -298,6 +303,142 @@ DOC_REPLY_ACTIONS = [
 DEFAULT_REPLY_ACTIONS = [(reply,) for reply in DEFAULT_REPLIES] + DOC_REPLY_ACTIONS
 REPLY_SEPARATOR = "\n---\n"
 MESSAGE_SEPARATOR = "\n>>>\n"
+
+
+def normalize_google_doc_reply_text(text):
+    """Normalize exported list text and turn visible ↵ markers into newlines."""
+    text = text.replace("\xa0", " ")
+    lines = [
+        re.sub(r"[ \t]+", " ", line).strip()
+        for line in text.splitlines()
+    ]
+    normalized = "\n".join(lines).strip()
+    if "↵" in normalized:
+        normalized = "\n".join(
+            part.strip()
+            for part in normalized.split("↵")
+        ).strip()
+    return normalized
+
+
+class GoogleDocListHTMLParser(HTMLParser):
+    """Extract ordered Google Docs list items and their exported nesting level."""
+
+    LIST_LEVEL_RE = re.compile(r"(?:^|\s)lst-[^\s]+-(\d+)(?=\s|$)")
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items = []
+        self.list_levels = []
+        self.item_level = None
+        self.item_chunks = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag in {"ol", "ul"}:
+            class_name = attrs.get("class", "")
+            match = self.LIST_LEVEL_RE.search(class_name)
+            self.list_levels.append(int(match.group(1)) if match else None)
+        elif tag == "li" and self.list_levels:
+            level = self.list_levels[-1]
+            if level is not None:
+                self.item_level = level
+                self.item_chunks = []
+        elif tag == "br" and self.item_level is not None:
+            self.item_chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag == "li" and self.item_level is not None:
+            text = normalize_google_doc_reply_text("".join(self.item_chunks))
+            if text:
+                self.items.append((self.item_level, text))
+            self.item_level = None
+            self.item_chunks = []
+        elif tag in {"ol", "ul"} and self.list_levels:
+            self.list_levels.pop()
+
+    def handle_data(self, data):
+        if self.item_level is not None:
+            self.item_chunks.append(data)
+
+
+def parse_google_doc_reply_actions(html_text):
+    """Parse the live Doc: top-level items are actions; nested items follow it."""
+    parser = GoogleDocListHTMLParser()
+    parser.feed(html_text)
+    parser.close()
+
+    actions = []
+    for level, text in parser.items:
+        if level == 0 or not actions:
+            actions.append([text])
+        else:
+            actions[-1].append(text)
+    return [tuple(messages) for messages in actions if messages]
+
+
+def fetch_google_doc_reply_actions(
+    export_url=GOOGLE_DOC_EXPORT_URL,
+    timeout=GOOGLE_DOC_FETCH_TIMEOUT_SECONDS,
+    opener=urlopen,
+    now_fn=time.time,
+):
+    """Fetch a cache-busted public Doc export and preserve its list order."""
+    separator = "&" if "?" in export_url else "?"
+    request_url = (
+        f"{export_url}{separator}cache_bust={int(now_fn() * 1000)}"
+    )
+    request = Request(
+        request_url,
+        headers={
+            "User-Agent": f"WeChatPatResponder/{APP_VERSION}",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+    with opener(request, timeout=timeout) as response:
+        payload = response.read()
+        charset = response.headers.get_content_charset() or "utf-8"
+    actions = parse_google_doc_reply_actions(payload.decode(charset, errors="replace"))
+    if not actions:
+        raise ValueError("Google Doc 导出内容中没有可用的编号词条")
+    return actions
+
+
+def load_google_doc_cache(path=GOOGLE_DOC_CACHE_PATH):
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        actions = [
+            tuple(message for message in messages if isinstance(message, str))
+            for messages in payload.get("actions", [])
+            if isinstance(messages, list)
+        ]
+        return [messages for messages in actions if messages]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def save_google_doc_cache(actions, path=GOOGLE_DOC_CACHE_PATH):
+    payload = {
+        "source": GOOGLE_DOC_SOURCE_URL,
+        "fetched_at": time.time(),
+        "actions": [list(messages) for messages in actions],
+    }
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, path)
+
+
+def reply_library_digest(actions):
+    serialized = json.dumps(
+        [list(messages) for messages in actions],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def parse_reply_blocks(text):
@@ -693,6 +834,15 @@ class App:
         self.confirmed_once = False
         self.last_window_rect = None
         self.tickle_state = load_tickle_state()
+        cached_actions = load_google_doc_cache()
+        self.reply_actions_cache = list(
+            cached_actions or DEFAULT_REPLY_ACTIONS
+        )
+        self.reply_actions_digest = reply_library_digest(
+            self.reply_actions_cache
+        )
+        self.doc_refresh_succeeded = False
+        self.doc_last_error = ""
 
         self.status = tk.StringVar(value="状态：尚未连接")
         self.auto_send = tk.BooleanVar(value=True)
@@ -700,10 +850,11 @@ class App:
         self.sidebar_mode = tk.BooleanVar(value=True)
         self.build_ui()
         self.root.after(100, self.process_events)
+        self.root.after(250, self.refresh_reply_library)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.log(
-            "随机行为已就绪：包含 Google Doc 的 25 个行为；"
-            "二级条目会作为连续独立消息发送。"
+            "Google Doc 模式已就绪；启动时读取一次，之后可点击 "
+            "Reload 文档手动更新。二级条目会作为连续独立消息发送。"
         )
 
     def build_ui(self):
@@ -720,7 +871,8 @@ class App:
         ttk.Label(
             outer,
             text=(
-                "随机回复库（--- 分隔随机行为；>>> 分隔同一行为内连续发送的消息）"
+                "Google Doc 回复库（只读快照；一级编号是随机行为，"
+                "二级编号是连续消息）"
             ),
         ).pack(
             anchor="w", pady=(12, 4)
@@ -728,8 +880,9 @@ class App:
         self.replies = scrolledtext.ScrolledText(outer, height=6, wrap="word")
         self.replies.insert(
             "1.0",
-            format_reply_actions_for_editor(DEFAULT_REPLY_ACTIONS),
+            format_reply_actions_for_editor(self.reply_actions_cache),
         )
+        self.replies.configure(state="disabled")
         self.replies.pack(fill="x")
 
         ttk.Checkbutton(
@@ -760,6 +913,11 @@ class App:
         ttk.Button(buttons, text="测试随机结果", command=self.test_reply).pack(
             side="left"
         )
+        ttk.Button(
+            buttons,
+            text="Reload 文档",
+            command=self.refresh_reply_library,
+        ).pack(side="left", padx=(8, 0))
         ttk.Button(
             buttons,
             text="打开发送记录",
@@ -793,6 +951,49 @@ class App:
         self.ocr_preview.insert("1.0", text or "(没有识别到文字)")
         self.ocr_preview.configure(state="disabled")
 
+    def set_reply_library_preview(self, actions):
+        self.replies.configure(state="normal")
+        self.replies.delete("1.0", "end")
+        self.replies.insert(
+            "1.0",
+            format_reply_actions_for_editor(actions),
+        )
+        self.replies.configure(state="disabled")
+
+    def refresh_reply_library(self):
+        try:
+            actions = fetch_google_doc_reply_actions()
+        except Exception as exc:
+            error_text = str(exc)
+            if error_text != self.doc_last_error:
+                self.log(
+                    "读取 Google Doc 失败，继续使用最近一次成功缓存："
+                    f"{error_text}"
+                )
+            self.doc_last_error = error_text
+            return list(self.reply_actions_cache)
+
+        digest = reply_library_digest(actions)
+        changed = digest != self.reply_actions_digest
+        first_success = not self.doc_refresh_succeeded
+        self.reply_actions_cache = list(actions)
+        self.reply_actions_digest = digest
+        self.doc_refresh_succeeded = True
+        self.doc_last_error = ""
+        self.set_reply_library_preview(actions)
+        try:
+            save_google_doc_cache(actions)
+        except OSError as exc:
+            self.log(f"文档词条已读取，但本地缓存保存失败：{exc}")
+
+        if changed or first_success:
+            change_label = "内容有更新，" if changed and not first_success else ""
+            self.log(
+                f"已载入 Google Doc：{change_label}"
+                f"{len(actions)} 个随机行为，顺序与文档一致。"
+            )
+        return list(actions)
+
     def get_triggers(self):
         return [
             normalize(item)
@@ -801,7 +1002,7 @@ class App:
         ]
 
     def get_reply_actions(self):
-        return parse_reply_actions(self.replies.get("1.0", "end"))
+        return list(self.reply_actions_cache)
 
     def toggle(self):
         if self.worker and self.worker.is_alive():
@@ -1251,7 +1452,7 @@ class App:
         used_count = len(
             self.tickle_state["used_library_replies"].get(row_id, [])
         )
-        library_count = len(self.get_reply_actions())
+        library_count = len(self.reply_actions_cache)
         self.log(
             f"去重记录：会话「{row_id}」本轮已使用 "
             f"{used_count}/{library_count} 条随机库回复"

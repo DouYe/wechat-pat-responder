@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0
+
+- Read the public Google Doc once at startup and on the new **Reload 文档**
+  button, without network requests during pat-triggered replies.
+- Preserve top-level action order and nested consecutive-message order.
+- Convert visible `↵` markers in a Doc item into message-internal newlines.
+- Cache the latest successful ordered Doc snapshot for offline fallback.
+- Keep per-conversation no-repeat history stable when existing Doc text remains
+  unchanged, while appended actions become available automatically.
+
 ## 1.4.0
 
 - Synchronized 25 random actions from the configured Google Doc.

@@ -16,57 +16,43 @@ matching conversation, and sends a weighted random response.
 - Handles repeated pats with per-conversation state and a short deduplication
   interval.
 - Weighted actions:
-  - 90% mixed reply, including absurd text, multiline copypasta, and serious
-    life quotes
+  - 90% reply read directly from the live Google Doc
   - 4% persistent counter
   - 3% combo/streak response
   - 2% playful fake-system text
   - 1% text-only red-packet easter egg
-- Includes a much stranger built-in reply library, and custom replies have no
-  fixed length limit.
-- Includes 25 actions synchronized from the
+- Reads the public
   [Google Doc reply source](https://docs.google.com/document/d/1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0).
-  A top-level numbered item is one random action; its nested items are sent as
-  additional, separate messages in order.
+  once at startup. Click **Reload 文档** whenever you want to import newly
+  appended entries; pat-triggered replies do not make network requests.
+- Preserves the document's action order. A top-level numbered item is one
+  random action; its nested items are sent as additional, separate messages in
+  order.
+- Saves every successful read as an ordered local cache. If Google Docs is
+  temporarily unavailable, the last successful cache is used instead.
 - Draws library replies without replacement for each detected conversation.
   A new cycle begins only after that conversation has received the entire
   current library, and the first reply of a new cycle cannot immediately repeat
   the previous reply.
 
-## Multiline replies
+## Google Doc reply format
 
-The editor treats a line containing only `---` as the separator between two
-random replies. Every other newline, including blank lines, remains part of the
-message sent to WeChat:
+- Each top-level numbered item is one random action.
+- Nested numbered items belong to the preceding top-level action and are sent
+  as separate messages in their displayed order.
+- Put `↵` inside one numbered item to create a newline inside that same WeChat
+  message. Two markers (`↵ ↵`) create a blank line.
 
 ```text
-First line
-Second line
-
-This blank line is preserved.
----
-This is another random reply.
+1. “Doing the same thing and expecting different results is madness.”
+   a. And you, my friend, are very mad.
+2. First line ↵ Second line ↵ ↵ Final paragraph.
 ```
 
 The app does not truncate replies, although WeChat may still enforce its own
-message-length limit.
-
-## Consecutive messages
-
-A line containing only `>>>` separates messages inside one random action.
-Unlike a normal newline, each part is pasted and sent separately, with a short
-delay while preserving order:
-
-```text
-“Doing the same thing and expecting different results is madness.”
->>>
-And you, my friend, are very mad.
----
-This begins another random action.
-```
-
-The Google Doc is currently private, so its revision is synchronized into the
-source by the maintainer rather than fetched anonymously at runtime.
+message-length limit. Existing entries keep stable per-conversation history as
+long as their text is not edited; newly appended entries automatically join the
+unused pool.
 
 ## Supported systems
 
