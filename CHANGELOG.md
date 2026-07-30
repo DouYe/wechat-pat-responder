@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.0
+
+- Move startup and manual Google Doc reloads to a background worker so OCR,
+  monitoring, and the UI remain responsive during large downloads.
+- Raise the socket timeout from 4 to 90 seconds and stream the HTML export in
+  512 KB chunks instead of retaining the full document and every Base64 image
+  in memory at once.
+- Show downloaded megabytes on the Reload button while a refresh is running.
+- Add a persistent source-image index so unchanged cached images skip Base64
+  decoding and image validation on later reloads.
+- Keep the last successful reply snapshot active if a large refresh still
+  fails.
+
 ## 1.6.0
 
 - Import image-only numbered Google Doc entries as random actions.

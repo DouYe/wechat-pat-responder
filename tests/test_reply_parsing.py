@@ -20,6 +20,7 @@ from WeChatPatResponder import (
     image_to_dib_bytes,
     is_image_message,
     load_google_doc_cache,
+    load_google_doc_media_index,
     load_tickle_state,
     materialize_google_doc_image,
     parse_google_doc_reply_actions,
@@ -28,6 +29,7 @@ from WeChatPatResponder import (
     record_reply_sent,
     reply_action_key,
     save_google_doc_cache,
+    save_google_doc_media_index,
 )
 
 
@@ -172,20 +174,66 @@ class GoogleDocReplyTests(unittest.TestCase):
         )
         self.assertEqual(preview, "文字\n>>>\n[图片]")
 
+    def test_cached_image_source_skips_redecoding_on_later_reload(self):
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (2, 2), (1, 2, 3)).save(image_buffer, "JPEG")
+        source = (
+            "data:image/jpeg;base64,"
+            + base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media_dir = Path(temp_dir)
+            index_path = media_dir / "index.json"
+            source_index = {}
+            first_token = materialize_google_doc_image(
+                source,
+                media_dir,
+                source_index,
+            )
+            save_google_doc_media_index(source_index, index_path)
+            loaded_index = load_google_doc_media_index(
+                index_path,
+                media_dir,
+            )
+
+            with patch(
+                "WeChatPatResponder.base64.b64decode",
+                side_effect=AssertionError("cached image was decoded again"),
+            ):
+                second_token = materialize_google_doc_image(
+                    source,
+                    media_dir,
+                    loaded_index,
+                )
+
+        self.assertEqual(second_token, first_token)
+
     def test_live_fetch_is_cache_busted(self):
         html = (
             '<ol class="lst-kix_demo-0">'
             "<li>实时第一条</li><li>实时第二条</li></ol>"
         )
         captured = {}
+        progress = []
 
         class Headers:
             @staticmethod
             def get_content_charset():
                 return "utf-8"
 
+            @staticmethod
+            def get(name):
+                if name.lower() == "content-length":
+                    return str(len(html.encode("utf-8")))
+                return None
+
         class Response:
             headers = Headers()
+
+            def __init__(self):
+                self.payload = html.encode("utf-8")
+                self.offset = 0
 
             def __enter__(self):
                 return self
@@ -193,24 +241,72 @@ class GoogleDocReplyTests(unittest.TestCase):
             def __exit__(self, *_):
                 return False
 
-            @staticmethod
-            def read():
-                return html.encode("utf-8")
+            def read(self, size):
+                chunk = self.payload[self.offset:self.offset + min(size, 7)]
+                self.offset += len(chunk)
+                return chunk
 
         def opener(request, timeout):
             captured["url"] = request.full_url
             captured["timeout"] = timeout
             return Response()
 
-        actions = fetch_google_doc_reply_actions(
-            export_url="https://example.test/export?format=html",
-            timeout=2.5,
-            opener=opener,
-            now_fn=lambda: 123.456,
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            actions = fetch_google_doc_reply_actions(
+                export_url="https://example.test/export?format=html",
+                timeout=2.5,
+                opener=opener,
+                now_fn=lambda: 123.456,
+                media_dir=Path(temp_dir),
+                chunk_size=7,
+                progress_callback=lambda downloaded, total: progress.append(
+                    (downloaded, total)
+                ),
+            )
         self.assertEqual(actions, [("实时第一条",), ("实时第二条",)])
         self.assertIn("cache_bust=123456", captured["url"])
         self.assertEqual(captured["timeout"], 2.5)
+        self.assertGreater(len(progress), 1)
+        self.assertEqual(progress[-1][0], len(html.encode("utf-8")))
+        self.assertEqual(progress[-1][1], len(html.encode("utf-8")))
+
+    def test_streaming_fetch_stops_at_configured_size_limit(self):
+        html = '<ol class="lst-kix_demo-0"><li>过大</li></ol>'
+
+        class Headers:
+            @staticmethod
+            def get_content_charset():
+                return "utf-8"
+
+            @staticmethod
+            def get(_):
+                return None
+
+        class Response:
+            headers = Headers()
+
+            def __init__(self):
+                self.sent = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _):
+                if self.sent:
+                    return b""
+                self.sent = True
+                return html.encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "超过安全上限"):
+                fetch_google_doc_reply_actions(
+                    opener=lambda *_args, **_kwargs: Response(),
+                    media_dir=Path(temp_dir),
+                    max_export_bytes=5,
+                )
 
     def test_cache_round_trip_keeps_action_and_message_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -257,6 +353,31 @@ class GoogleDocReplyTests(unittest.TestCase):
         self.assertEqual(loaded, new_actions)
         self.assertEqual(app.reply_actions_cache, new_actions)
         app.set_reply_library_preview.assert_called_once_with(new_actions)
+
+    def test_reload_button_starts_background_worker(self):
+        app = App.__new__(App)
+        app.doc_reload_in_progress = False
+        app.reload_button = Mock()
+        app.log = Mock()
+        worker = Mock()
+
+        with patch(
+            "WeChatPatResponder.threading.Thread",
+            return_value=worker,
+        ) as thread_class:
+            app.start_reply_library_refresh()
+
+        self.assertTrue(app.doc_reload_in_progress)
+        app.reload_button.configure.assert_called_once_with(
+            state="disabled",
+            text="Reload 中…",
+        )
+        worker.start.assert_called_once_with()
+        self.assertEqual(
+            thread_class.call_args.kwargs["target"],
+            app.reply_library_refresh_worker,
+        )
+        self.assertTrue(thread_class.call_args.kwargs["daemon"])
 
 
 class DispatchTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import codecs
 import ctypes
 import hashlib
 import io
@@ -17,7 +18,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 GOOGLE_DOC_SOURCE_URL = (
     "https://docs.google.com/document/d/"
     "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0"
@@ -27,7 +28,9 @@ GOOGLE_DOC_EXPORT_URL = (
     "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/export"
     "?format=html&tab=t.0"
 )
-GOOGLE_DOC_FETCH_TIMEOUT_SECONDS = 4.0
+GOOGLE_DOC_FETCH_TIMEOUT_SECONDS = 90.0
+GOOGLE_DOC_DOWNLOAD_CHUNK_BYTES = 512 * 1024
+MAX_GOOGLE_DOC_EXPORT_BYTES = 512 * 1024 * 1024
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -72,6 +75,7 @@ REPLY_HISTORY_PATH = APP_DIR / "reply_history.txt"
 STATE_PATH = APP_DIR / "tickle_state.json"
 GOOGLE_DOC_CACHE_PATH = APP_DIR / "google_doc_replies_cache.json"
 GOOGLE_DOC_MEDIA_DIR = APP_DIR / "google_doc_media"
+GOOGLE_DOC_MEDIA_INDEX_PATH = GOOGLE_DOC_MEDIA_DIR / "index.json"
 IMAGE_MESSAGE_PREFIX = "[[WECHAT_IMAGE:"
 IMAGE_MESSAGE_RE = re.compile(
     r"^\[\[WECHAT_IMAGE:([0-9a-f]{64})\.(jpg|png|gif|webp)\]\]$"
@@ -340,13 +344,14 @@ class GoogleDocListHTMLParser(HTMLParser):
 
     LIST_LEVEL_RE = re.compile(r"(?:^|\s)lst-[^\s]+-(\d+)(?=\s|$)")
 
-    def __init__(self):
+    def __init__(self, image_resolver=None):
         super().__init__(convert_charrefs=True)
+        self.image_resolver = image_resolver
         self.items = []
         self.list_levels = []
         self.item_level = None
         self.item_chunks = []
-        self.item_image_sources = []
+        self.item_images = []
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -359,28 +364,29 @@ class GoogleDocListHTMLParser(HTMLParser):
             if level is not None:
                 self.item_level = level
                 self.item_chunks = []
-                self.item_image_sources = []
+                self.item_images = []
         elif tag == "br" and self.item_level is not None:
             self.item_chunks.append("\n")
         elif tag == "img" and self.item_level is not None:
             source = attrs.get("src", "").strip()
             if source:
-                self.item_image_sources.append(source)
+                if self.image_resolver is not None:
+                    self.item_images.append(self.image_resolver(source))
 
     def handle_endtag(self, tag):
         if tag == "li" and self.item_level is not None:
             text = normalize_google_doc_reply_text("".join(self.item_chunks))
-            if text or self.item_image_sources:
+            if text or self.item_images:
                 self.items.append(
                     (
                         self.item_level,
                         text,
-                        tuple(self.item_image_sources),
+                        tuple(self.item_images),
                     )
                 )
             self.item_level = None
             self.item_chunks = []
-            self.item_image_sources = []
+            self.item_images = []
         elif tag in {"ol", "ul"} and self.list_levels:
             self.list_levels.pop()
 
@@ -389,22 +395,13 @@ class GoogleDocListHTMLParser(HTMLParser):
             self.item_chunks.append(data)
 
 
-def parse_google_doc_reply_actions(html_text, image_resolver=None):
-    """Parse the live Doc: top-level items are actions; nested items follow it."""
-    parser = GoogleDocListHTMLParser()
-    parser.feed(html_text)
-    parser.close()
-
+def google_doc_items_to_actions(items):
     actions = []
-    for level, text, image_sources in parser.items:
+    for level, text, image_messages in items:
         messages = []
         if text:
             messages.append(text)
-        if image_resolver is not None:
-            messages.extend(
-                image_resolver(source)
-                for source in image_sources
-            )
+        messages.extend(image_messages)
         if not messages:
             continue
         if level == 0 or not actions:
@@ -412,6 +409,14 @@ def parse_google_doc_reply_actions(html_text, image_resolver=None):
         else:
             actions[-1].extend(messages)
     return [tuple(messages) for messages in actions if messages]
+
+
+def parse_google_doc_reply_actions(html_text, image_resolver=None):
+    """Parse the live Doc: top-level items are actions; nested items follow it."""
+    parser = GoogleDocListHTMLParser(image_resolver=image_resolver)
+    parser.feed(html_text)
+    parser.close()
+    return google_doc_items_to_actions(parser.items)
 
 
 def is_image_message(message):
@@ -435,11 +440,65 @@ def image_message_path(message, media_dir=GOOGLE_DOC_MEDIA_DIR):
     return path
 
 
-def materialize_google_doc_image(source, media_dir=GOOGLE_DOC_MEDIA_DIR):
+def load_google_doc_media_index(path=GOOGLE_DOC_MEDIA_INDEX_PATH, media_dir=None):
+    if media_dir is None:
+        media_dir = path.parent
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        mappings = payload.get("sources", {})
+        if not isinstance(mappings, dict):
+            return {}
+        usable = {}
+        for source_digest, token in mappings.items():
+            if not re.fullmatch(r"[0-9a-f]{64}", source_digest):
+                continue
+            try:
+                image_message_path(token, media_dir)
+            except (ValueError, FileNotFoundError):
+                continue
+            usable[source_digest] = token
+        return usable
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_google_doc_media_index(
+    mappings,
+    path=GOOGLE_DOC_MEDIA_INDEX_PATH,
+):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "sources": dict(sorted(mappings.items())),
+    }
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, path)
+
+
+def materialize_google_doc_image(
+    source,
+    media_dir=GOOGLE_DOC_MEDIA_DIR,
+    source_index=None,
+):
     """Validate and cache a Google Doc data-image, returning a stable token."""
-    match = DATA_IMAGE_RE.fullmatch(source.strip())
+    source = source.strip()
+    match = DATA_IMAGE_RE.fullmatch(source)
     if match is None:
         raise ValueError("Google Doc 图片不是受支持的内嵌图片")
+    source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    if source_index is not None:
+        cached_token = source_index.get(source_digest)
+        if cached_token:
+            try:
+                image_message_path(cached_token, media_dir)
+                return cached_token
+            except (ValueError, FileNotFoundError):
+                source_index.pop(source_digest, None)
+
     extension = match.group(1).lower()
     if extension == "jpeg":
         extension = "jpg"
@@ -468,7 +527,10 @@ def materialize_google_doc_image(source, media_dir=GOOGLE_DOC_MEDIA_DIR):
         temp_path = target.with_suffix(target.suffix + ".tmp")
         temp_path.write_bytes(image_bytes)
         os.replace(temp_path, target)
-    return f"{IMAGE_MESSAGE_PREFIX}{digest}.{extension}]]"
+    token = f"{IMAGE_MESSAGE_PREFIX}{digest}.{extension}]]"
+    if source_index is not None:
+        source_index[source_digest] = token
+    return token
 
 
 def image_to_dib_bytes(path):
@@ -506,8 +568,29 @@ def fetch_google_doc_reply_actions(
     opener=urlopen,
     now_fn=time.time,
     media_dir=GOOGLE_DOC_MEDIA_DIR,
+    media_index_path=None,
+    chunk_size=GOOGLE_DOC_DOWNLOAD_CHUNK_BYTES,
+    max_export_bytes=MAX_GOOGLE_DOC_EXPORT_BYTES,
+    progress_callback=None,
 ):
-    """Fetch a cache-busted public Doc export and preserve its list order."""
+    """Stream a cache-busted Doc export without retaining every image in RAM."""
+    media_dir = Path(media_dir)
+    if media_index_path is None:
+        media_index_path = media_dir / "index.json"
+    else:
+        media_index_path = Path(media_index_path)
+    source_index = load_google_doc_media_index(
+        media_index_path,
+        media_dir,
+    )
+    parser = GoogleDocListHTMLParser(
+        image_resolver=lambda source: materialize_google_doc_image(
+            source,
+            media_dir,
+            source_index,
+        )
+    )
+
     separator = "&" if "?" in export_url else "?"
     request_url = (
         f"{export_url}{separator}cache_bust={int(now_fn() * 1000)}"
@@ -521,17 +604,42 @@ def fetch_google_doc_reply_actions(
         },
     )
     with opener(request, timeout=timeout) as response:
-        payload = response.read()
         charset = response.headers.get_content_charset() or "utf-8"
-    actions = parse_google_doc_reply_actions(
-        payload.decode(charset, errors="replace"),
-        image_resolver=lambda source: materialize_google_doc_image(
-            source,
-            media_dir,
-        ),
-    )
+        decoder = codecs.getincrementaldecoder(charset)(errors="replace")
+        length_value = (
+            response.headers.get("Content-Length")
+            if hasattr(response.headers, "get")
+            else None
+        )
+        try:
+            total_bytes = int(length_value) if length_value else None
+        except (TypeError, ValueError):
+            total_bytes = None
+        downloaded_bytes = 0
+
+        while True:
+            chunk = response.read(chunk_size)
+            if not chunk:
+                break
+            downloaded_bytes += len(chunk)
+            if downloaded_bytes > max_export_bytes:
+                raise ValueError(
+                    "Google Doc 导出内容超过安全上限 "
+                    f"{max_export_bytes // (1024 * 1024)} MB"
+                )
+            parser.feed(decoder.decode(chunk))
+            if progress_callback is not None:
+                progress_callback(downloaded_bytes, total_bytes)
+        parser.feed(decoder.decode(b"", final=True))
+    parser.close()
+
+    actions = google_doc_items_to_actions(parser.items)
     if not actions:
         raise ValueError("Google Doc 导出内容中没有可用的编号词条")
+    try:
+        save_google_doc_media_index(source_index, media_index_path)
+    except OSError:
+        pass
     return actions
 
 
@@ -967,6 +1075,8 @@ class App:
         self.events = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = None
+        self.doc_worker = None
+        self.doc_reload_in_progress = False
         self.confirmed_once = False
         self.last_window_rect = None
         self.tickle_state = load_tickle_state()
@@ -986,7 +1096,7 @@ class App:
         self.sidebar_mode = tk.BooleanVar(value=True)
         self.build_ui()
         self.root.after(100, self.process_events)
-        self.root.after(250, self.refresh_reply_library)
+        self.root.after(250, self.start_reply_library_refresh)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.log(
             "Google Doc 模式已就绪；启动时读取一次，之后可点击 "
@@ -1050,11 +1160,12 @@ class App:
         ttk.Button(buttons, text="测试随机结果", command=self.test_reply).pack(
             side="left"
         )
-        ttk.Button(
+        self.reload_button = ttk.Button(
             buttons,
             text="Reload 文档",
-            command=self.refresh_reply_library,
-        ).pack(side="left", padx=(8, 0))
+            command=self.start_reply_library_refresh,
+        )
+        self.reload_button.pack(side="left", padx=(8, 0))
         ttk.Button(
             buttons,
             text="打开发送记录",
@@ -1101,15 +1212,19 @@ class App:
         try:
             actions = fetch_google_doc_reply_actions()
         except Exception as exc:
-            error_text = str(exc)
-            if error_text != self.doc_last_error:
-                self.log(
-                    "读取 Google Doc 失败，继续使用最近一次成功缓存："
-                    f"{error_text}"
-                )
-            self.doc_last_error = error_text
+            self.handle_reply_library_error(str(exc))
             return list(self.reply_actions_cache)
+        return self.apply_reply_library_actions(actions)
 
+    def handle_reply_library_error(self, error_text):
+        if error_text != self.doc_last_error:
+            self.log(
+                "读取 Google Doc 失败，继续使用最近一次成功缓存："
+                f"{error_text}"
+            )
+        self.doc_last_error = error_text
+
+    def apply_reply_library_actions(self, actions):
         digest = reply_library_digest(actions)
         changed = digest != self.reply_actions_digest
         first_success = not self.doc_refresh_succeeded
@@ -1130,6 +1245,67 @@ class App:
                 f"{len(actions)} 个随机行为，顺序与文档一致。"
             )
         return list(actions)
+
+    def start_reply_library_refresh(self):
+        if self.doc_reload_in_progress:
+            return
+        self.doc_reload_in_progress = True
+        self.reload_button.configure(
+            state="disabled",
+            text="Reload 中…",
+        )
+        self.log(
+            "开始在后台读取 Google Doc；大文档会分块下载，"
+            "期间监控和界面可继续使用。"
+        )
+        self.doc_worker = threading.Thread(
+            target=self.reply_library_refresh_worker,
+            daemon=True,
+        )
+        self.doc_worker.start()
+
+    def reply_library_refresh_worker(self):
+        last_reported = 0
+
+        def report_progress(downloaded_bytes, total_bytes):
+            nonlocal last_reported
+            report_interval = 2 * 1024 * 1024
+            reached_end = (
+                total_bytes is not None
+                and downloaded_bytes >= total_bytes
+            )
+            if (
+                downloaded_bytes - last_reported >= report_interval
+                or reached_end
+            ):
+                last_reported = downloaded_bytes
+                self.events.put(
+                    (
+                        "doc_progress",
+                        downloaded_bytes,
+                        total_bytes,
+                    )
+                )
+
+        try:
+            actions = fetch_google_doc_reply_actions(
+                progress_callback=report_progress,
+            )
+        except Exception as exc:
+            self.events.put(("doc_reload_done", None, str(exc)))
+        else:
+            self.events.put(("doc_reload_done", actions, None))
+
+    def finish_reply_library_refresh(self, actions, error_text):
+        self.doc_reload_in_progress = False
+        self.reload_button.configure(
+            state="normal",
+            text="Reload 文档",
+        )
+        if error_text:
+            self.handle_reply_library_error(error_text)
+            return list(self.reply_actions_cache)
+        return self.apply_reply_library_actions(actions)
 
     def get_triggers(self):
         return [
@@ -1401,6 +1577,20 @@ class App:
                 elif kind == "error":
                     self.status.set("状态：检测出错")
                     self.log(f"错误：{event[1]}")
+                elif kind == "doc_progress":
+                    _, downloaded_bytes, total_bytes = event
+                    downloaded_mb = downloaded_bytes / (1024 * 1024)
+                    if total_bytes:
+                        total_mb = total_bytes / (1024 * 1024)
+                        button_text = (
+                            f"Reload {downloaded_mb:.1f}/{total_mb:.1f} MB"
+                        )
+                    else:
+                        button_text = f"Reload {downloaded_mb:.1f} MB"
+                    self.reload_button.configure(text=button_text)
+                elif kind == "doc_reload_done":
+                    _, actions, error_text = event
+                    self.finish_reply_library_refresh(actions, error_text)
                 elif kind == "trigger":
                     _, detected_text, hwnd, rect, forced_reply = event
                     self.log(f"检测到新事件：「{detected_text}」")

@@ -25,12 +25,18 @@ matching conversation, and sends a weighted random response.
   [Google Doc reply source](https://docs.google.com/document/d/1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0).
   once at startup. Click **Reload 文档** whenever you want to import newly
   appended entries; pat-triggered replies do not make network requests.
+- Runs startup/Reload downloads in the background with a 90-second socket
+  timeout. Large exports are parsed in 512 KB chunks and the button displays
+  downloaded megabytes, so OCR monitoring and the UI remain responsive.
 - Preserves the document's action order. A top-level numbered item is one
   random action; its nested items are sent as additional, separate messages in
   order.
 - Imports an image-only numbered item as an image reply. Images are downloaded
   only during startup/Reload, cached by content hash, and pasted into WeChat
   from the Windows image clipboard when selected.
+- Keeps a source-image index inside `google_doc_media`, allowing unchanged
+  images to reuse their validated local files without Base64 decoding on every
+  later Reload.
 - Saves every successful read as an ordered local cache. If Google Docs is
   temporarily unavailable, the last successful cache is used instead.
 - Draws library replies without replacement for each detected conversation.
@@ -59,6 +65,11 @@ The app does not truncate replies, although WeChat may still enforce its own
 message-length limit. Existing entries keep stable per-conversation history as
 long as their text is not edited; newly appended entries automatically join the
 unused pool.
+
+Google's public HTML export still transfers the complete document on each
+Reload; it does not provide an unauthenticated incremental feed. Compressing
+very large source images before inserting them will therefore reduce every
+Reload time, even though cached images no longer need to be decoded again.
 
 ## Supported systems
 
