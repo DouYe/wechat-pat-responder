@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from WeChatPatResponder import (
     App,
@@ -171,6 +171,30 @@ class GoogleDocReplyTests(unittest.TestCase):
                 app.reply_actions_cache,
             )
         fetch.assert_not_called()
+
+    def test_reload_replaces_cache_and_visible_library_preview(self):
+        app = App.__new__(App)
+        old_actions = [("旧词条",)]
+        new_actions = [("新词条一",), ("新词条二", "连续消息")]
+        app.reply_actions_cache = old_actions
+        app.reply_actions_digest = "old-digest"
+        app.doc_refresh_succeeded = True
+        app.doc_last_error = ""
+        app.set_reply_library_preview = Mock()
+        app.log = Mock()
+
+        with (
+            patch(
+                "WeChatPatResponder.fetch_google_doc_reply_actions",
+                return_value=new_actions,
+            ),
+            patch("WeChatPatResponder.save_google_doc_cache"),
+        ):
+            loaded = app.refresh_reply_library()
+
+        self.assertEqual(loaded, new_actions)
+        self.assertEqual(app.reply_actions_cache, new_actions)
+        app.set_reply_library_preview.assert_called_once_with(new_actions)
 
 
 class DispatchTests(unittest.TestCase):
