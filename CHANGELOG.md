@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.1
+
+- Materialize text replies with the native Windows Unicode clipboard instead
+  of Tk clipboard ownership, preventing a later message from replacing an
+  earlier queued paste on slower VMs.
+- Wait for WeChat to process each paste and Send click before preparing the
+  next message in a multi-message reply.
+
 ## 1.7.0
 
 - Move startup and manual Google Doc reloads to a background worker so OCR,

@@ -12,6 +12,7 @@ from WeChatPatResponder import (
     App,
     DOC_REPLY_ACTIONS,
     choose_unused_reply,
+    copy_text_to_clipboard,
     dispatch_reply_action,
     fetch_google_doc_reply_actions,
     format_message_preview,
@@ -391,6 +392,35 @@ class DispatchTests(unittest.TestCase):
         )
         self.assertEqual(sent, ["第一条", "第二条"])
         self.assertEqual(pauses, [0.6])
+
+
+class ClipboardTests(unittest.TestCase):
+    @patch("WeChatPatResponder.win32clipboard")
+    def test_text_is_materialized_in_native_unicode_clipboard(self, clipboard):
+        copy_text_to_clipboard("第一条")
+
+        clipboard.OpenClipboard.assert_called_once_with()
+        clipboard.EmptyClipboard.assert_called_once_with()
+        clipboard.SetClipboardText.assert_called_once_with("第一条", 13)
+        clipboard.CloseClipboard.assert_called_once_with()
+
+    @patch("WeChatPatResponder.time.sleep")
+    @patch("WeChatPatResponder.win32clipboard")
+    def test_text_clipboard_retries_when_temporarily_busy(
+        self,
+        clipboard,
+        sleep,
+    ):
+        clipboard.OpenClipboard.side_effect = [
+            RuntimeError("busy"),
+            None,
+        ]
+
+        copy_text_to_clipboard("第二条", retry_count=2, retry_delay=0.1)
+
+        self.assertEqual(clipboard.OpenClipboard.call_count, 2)
+        clipboard.SetClipboardText.assert_called_once_with("第二条", 13)
+        sleep.assert_called_once_with(0.1)
 
 
 class NoRepeatTests(unittest.TestCase):

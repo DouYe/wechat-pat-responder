@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 GOOGLE_DOC_SOURCE_URL = (
     "https://docs.google.com/document/d/"
     "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0"
@@ -86,6 +86,10 @@ DATA_IMAGE_RE = re.compile(
 )
 MAX_DOC_IMAGE_BYTES = 25 * 1024 * 1024
 WINDOWS_CF_DIB = 8
+WINDOWS_CF_UNICODETEXT = 13
+TEXT_PASTE_SETTLE_SECONDS = 0.80
+IMAGE_PASTE_SETTLE_SECONDS = 1.00
+SEND_SETTLE_SECONDS = 0.50
 DISPLAY_TIME_RE = re.compile(
     r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b\d{1,2}/\d{1,2}\b|yesterday",
     re.IGNORECASE,
@@ -560,6 +564,27 @@ def copy_image_to_clipboard(path, retry_count=8, retry_delay=0.05):
             last_error = exc
             time.sleep(retry_delay)
     raise RuntimeError(f"无法把图片写入 Windows 剪贴板：{last_error}")
+
+
+def copy_text_to_clipboard(text, retry_count=8, retry_delay=0.05):
+    """Materialize Unicode text in the native clipboard before WeChat pastes it."""
+    last_error = None
+    for _ in range(retry_count):
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(
+                    str(text),
+                    WINDOWS_CF_UNICODETEXT,
+                )
+            finally:
+                win32clipboard.CloseClipboard()
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(retry_delay)
+    raise RuntimeError(f"无法把文字写入 Windows 剪贴板：{last_error}")
 
 
 def fetch_google_doc_reply_actions(
@@ -1844,12 +1869,10 @@ class App:
         if is_image_message(message):
             path = image_message_path(message)
             copy_image_to_clipboard(path)
-            paste_delay = 0.65
+            paste_delay = IMAGE_PASTE_SETTLE_SECONDS
         else:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(message)
-            self.root.update()
-            paste_delay = 0.20
+            copy_text_to_clipboard(message)
+            paste_delay = TEXT_PASTE_SETTLE_SECONDS
 
         user32.keybd_event(0x11, 0, 0, 0)  # Ctrl down
         user32.keybd_event(0x56, 0, 0, 0)  # V down
@@ -1863,6 +1886,9 @@ class App:
         user32.SetCursorPos(send_x, send_y)
         user32.mouse_event(0x0002, 0, 0, 0, 0)
         user32.mouse_event(0x0004, 0, 0, 0, 0)
+        # VM 中微信的输入线程可能较慢。保持本条剪贴板内容不变，直到
+        # 粘贴和发送点击都已被处理，避免下一条覆盖上一条。
+        time.sleep(SEND_SETTLE_SECONDS)
 
     def test_reply(self):
         actions = self.get_reply_actions()
