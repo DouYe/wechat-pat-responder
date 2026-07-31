@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.2
+
+- Add `Update-and-Run.cmd` for one-click updates inside a Windows VM.
+- Fetch the latest GitHub Release metadata, verify the asset size and GitHub
+  SHA-256 digest, preserve runtime logs/cache/history, roll back replaced files
+  if installation fails, and restart the app automatically.
+
 ## 1.7.1
 
 - Materialize text replies with the native Windows Unicode clipboard instead

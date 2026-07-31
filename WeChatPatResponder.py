@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 GOOGLE_DOC_SOURCE_URL = (
     "https://docs.google.com/document/d/"
     "1zaxLelnWjSDkGEm1SFQnPh643NF7KGJXdcfjVFv7QdM/edit?tab=t.0"

@@ -46,8 +46,10 @@ jobs:
           Copy-Item CHANGELOG.md package\
           Copy-Item LICENSE package\
           Copy-Item Install-OCR.cmd package\
+          Copy-Item Update-and-Run.cmd package\
           New-Item -ItemType Directory -Path package\tools
           Copy-Item tools\Install-English-OCR.ps1 package\tools\
+          Copy-Item tools\Update-And-Run.ps1 package\tools\
           Compress-Archive -Path package\* -DestinationPath WeChatPatResponder-Windows-x64.zip
 
       - uses: actions/upload-artifact@v4

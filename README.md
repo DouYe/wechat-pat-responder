@@ -94,6 +94,10 @@ Desktop.
 6. Click **开始监控**. Existing visible entries become the baseline; ask someone
    to pat you again to test.
 
+After the first installation, double-click `Update-and-Run.cmd` whenever you
+want the newest GitHub Release. It verifies GitHub's SHA-256 digest, preserves
+the local history/cache/state files, installs the update, and starts the app.
+
 The executable is not code-signed, so Windows SmartScreen may show a warning.
 Review the source and build it yourself if you are not comfortable proceeding.
 
